@@ -1,7 +1,14 @@
 name: Build Parakeet ASR (CPU/arm64) e publicar no ghcr
 
+# Clona o projeto parakeet-local-asr (Pablo Bispo), constrói a imagem
+# do serviço de transcrição (ASR) para ARM64 e publica no seu
+# GitHub Container Registry (ghcr.io/ramonnote/parakeet-asr).
+#
+# Depois do primeiro build, marque o pacote como "Public" no GitHub
+# para o CasaOS conseguir baixar sem login.
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}        # botão "Run workflow" na aba Actions
   push:
     branches: [main]
 
@@ -19,6 +26,45 @@ jobs:
           repository: PabloBispo/parakeet-local-asr
           ref: master
 
+      # O servidor original não tem CORS. Sem CORS, um HTML em outra
+      # origem é bloqueado pelo navegador ao chamar a API. Aqui injetamos
+      # o CORSMiddleware do FastAPI liberando qualquer origem, direto no
+      # main.py, antes de construir a imagem. Assim não mantemos um fork.
+      - name: Injetar CORS no servidor (libera chamadas do navegador)
+        run: |
+          python3 - <<'PY'
+          import io, re, pathlib
+          p = pathlib.Path("approach-a/parakeet_service/main.py")
+          src = p.read_text(encoding="utf-8")
+
+          # 1) garante o import do middleware
+          if "CORSMiddleware" not in src:
+              src = src.replace(
+                  "from fastapi import FastAPI",
+                  "from fastapi import FastAPI\n"
+                  "from fastapi.middleware.cors import CORSMiddleware",
+                  1,
+              )
+
+          # 2) adiciona o middleware logo após criar o app, dentro de create_app()
+          marker = "    app.include_router(router)"
+          cors_block = (
+              "    app.add_middleware(\n"
+              "        CORSMiddleware,\n"
+              "        allow_origins=[\"*\"],\n"
+              "        allow_credentials=False,\n"
+              "        allow_methods=[\"*\"],\n"
+              "        allow_headers=[\"*\"],\n"
+              "    )\n"
+          )
+          if "add_middleware(" not in src:
+              src = src.replace(marker, cors_block + marker, 1)
+
+          p.write_text(src, encoding="utf-8")
+          print("---- main.py após injeção ----")
+          print(src)
+          PY
+
       - name: Configurar QEMU (para construir ARM64 em runner x86)
         uses: docker/setup-qemu-action@v3
 
@@ -35,6 +81,8 @@ jobs:
       - name: Build e push da imagem ASR (CPU, arm64)
         uses: docker/build-push-action@v6
         with:
+          # O serviço de transcrição fica na pasta approach-a,
+          # com o Dockerfile específico de CPU.
           context: ./approach-a
           file: ./approach-a/Dockerfile.cpu
           platforms: linux/arm64
