@@ -1,0 +1,77 @@
+name: Build Parakeet ASR (CPU/x86) e publicar no ghcr
+
+# Igual ao workflow da VPS, mas para x86/amd64 (NAS Zima é Intel).
+# Clona o projeto do Pablo, injeta CORS e publica em:
+#   ghcr.io/ramonnote/parakeet-asr:amd64
+# Lembre de marcar o pacote como PUBLIC após o 1º build.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Clonar o projeto do Pablo Bispo
+        uses: actions/checkout@v4
+        with:
+          repository: PabloBispo/parakeet-local-asr
+          ref: master
+
+      # Injeta CORS no servidor antes do build (mesmo motivo da VPS:
+      # sem CORS, o navegador bloqueia chamadas de outra origem).
+      - name: Injetar CORS no servidor
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("approach-a/parakeet_service/main.py")
+          src = p.read_text(encoding="utf-8")
+          if "CORSMiddleware" not in src:
+              src = src.replace(
+                  "from fastapi import FastAPI",
+                  "from fastapi import FastAPI\n"
+                  "from fastapi.middleware.cors import CORSMiddleware",
+                  1,
+              )
+          marker = "    app.include_router(router)"
+          cors_block = (
+              "    app.add_middleware(\n"
+              "        CORSMiddleware,\n"
+              "        allow_origins=[\"*\"],\n"
+              "        allow_credentials=False,\n"
+              "        allow_methods=[\"*\"],\n"
+              "        allow_headers=[\"*\"],\n"
+              "    )\n"
+          )
+          if "add_middleware(" not in src:
+              src = src.replace(marker, cors_block + marker, 1)
+          p.write_text(src, encoding="utf-8")
+          print("CORS injetado com sucesso.")
+          PY
+
+      # Sem QEMU: o runner do GitHub já é x86, então o build amd64 é nativo
+      # (muito mais rápido que o build ARM da VPS).
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e push da imagem ASR (CPU, amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./approach-a
+          file: ./approach-a/Dockerfile.cpu
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/ramonnote/parakeet-asr:amd64
